@@ -217,7 +217,7 @@ class OrganizationResult:
 
 ```bash
 # Clone repository
-git clone https://github.com/lukeslp/fileherder.git
+git clone https://github.com/actually-useful-ai/fileherder.git
 cd fileherder
 
 # Install with dev dependencies
