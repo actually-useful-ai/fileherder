@@ -13,7 +13,7 @@ AI dependencies, providing fast, reliable file management tools.
 MIT License by Luke Steuber
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 __author__ = "Luke Steuber"
 __email__ = "luke@lukesteuber.com"
 __license__ = "MIT"
