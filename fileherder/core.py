@@ -10,6 +10,8 @@ This module provides the essential classes for file operations:
 Author: Luke Steuber
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import mimetypes
@@ -17,6 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 from collections import defaultdict
+
+from .operations import (
+    _destination_path,
+    _prepare_destination_directory,
+    _require_regular_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +236,8 @@ class DuplicateFinder:
         Args:
             chunk_size: Bytes to read per iteration (for large files)
         """
+        if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
         self.chunk_size = chunk_size
 
     def hash_file(self, file_path: Path) -> HashResult:
@@ -308,7 +318,7 @@ class DuplicateFinder:
         files = []
 
         for file_path in directory.glob(pattern):
-            if not file_path.is_file():
+            if file_path.is_symlink() or not file_path.is_file():
                 continue
 
             # Skip hidden files
@@ -425,7 +435,7 @@ class FileOrganizer:
         category_files: Dict[str, List[Path]] = defaultdict(list)
 
         for file_path in directory.iterdir():
-            if not file_path.is_file():
+            if file_path.is_symlink() or not file_path.is_file():
                 continue
 
             # Skip hidden files
@@ -438,51 +448,60 @@ class FileOrganizer:
         # Organize files
         files_organized = 0
         categories_created = []
-        category_counts = {}
+        category_counts = {category: len(files) for category, files in category_files.items()}
+        errors = []
+
+        # Reject unsafe category entries before moving any file. A category
+        # name may itself be an input file, so validate the initial layout.
+        if create_subdirs:
+            for category in category_files:
+                try:
+                    _prepare_destination_directory(directory / category, dry_run=True)
+                except Exception as e:
+                    errors.append(str(e))
+            if errors:
+                return OrganizationResult(
+                    files_organized=0,
+                    categories_created=[],
+                    category_counts=category_counts,
+                    success=False,
+                    error='; '.join(errors)
+                )
 
         for category, files in category_files.items():
             if not files:
                 continue
 
-            category_counts[category] = len(files)
+            if not create_subdirs:
+                continue
 
-            if create_subdirs and not dry_run:
-                # Create category subdirectory
-                category_dir = directory / category
-                category_dir.mkdir(exist_ok=True)
-                categories_created.append(category)
+            category_dir = directory / category
+            try:
+                _prepare_destination_directory(category_dir, dry_run)
+            except Exception as e:
+                errors.append(str(e))
+                logger.error(f"Error preparing {category_dir}: {e}")
+                continue
+            categories_created.append(category)
 
-                # Move files
-                for file_path in files:
-                    try:
-                        dest = category_dir / file_path.name
-
-                        # Handle name conflicts
-                        if dest.exists():
-                            stem = file_path.stem
-                            suffix = file_path.suffix
-                            counter = 1
-                            while dest.exists():
-                                dest = category_dir / f"{stem}_{counter}{suffix}"
-                                counter += 1
-
+            for file_path in files:
+                try:
+                    _require_regular_file(file_path)
+                    dest = _destination_path(file_path, category_dir, overwrite=False)
+                    if not dry_run:
                         file_path.rename(dest)
-                        files_organized += 1
-                        logger.debug(f"Moved {file_path.name} -> {category}/")
-
-                    except Exception as e:
-                        logger.error(f"Error moving {file_path}: {e}")
-
-            elif dry_run:
-                categories_created.append(category)
-                files_organized += len(files)
-                logger.info(f"[DRY RUN] Would move {len(files)} files to {category}/")
+                    files_organized += 1
+                    logger.debug(f"{'Would move' if dry_run else 'Moved'} {file_path.name} -> {category}/")
+                except Exception as e:
+                    errors.append(f"{file_path}: {e}")
+                    logger.error(f"Error moving {file_path}: {e}")
 
         return OrganizationResult(
             files_organized=files_organized,
             categories_created=categories_created,
             category_counts=category_counts,
-            success=True
+            success=not errors,
+            error='; '.join(errors) if errors else None
         )
 
 

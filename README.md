@@ -12,7 +12,7 @@ A focused Python package for essential file management operations without heavy 
 
 - **Duplicate Detection** - Hash-based duplicate finding with SHA256
 - **File Organization** - Automatic categorization by file type
-- **Batch Operations** - Safe move, copy, delete, and rename operations
+- **Batch Operations** - Validated move, copy, delete, and rename operations
 - **Type Detection** - Smart file type classification
 - **Rich CLI** - Beautiful terminal interface (optional)
 - **Zero Required Dependencies** - Core functionality works standalone
@@ -51,6 +51,7 @@ fileherder stats /data
 ### Python API
 
 ```python
+from pathlib import Path
 from fileherder import FileHerder
 
 # Create herder instance
@@ -93,6 +94,29 @@ fileherder automatically categorizes files into:
 - **data** - CSV, JSON, XML, SQL, etc.
 - **text** - Plain text, logs, config files
 - **other** - Uncategorized files
+
+## File-operation boundaries
+
+The November 7 audit fixes are on a private local branch. The existing PyPI
+1.0.2 release does not contain them; see [tested findings and artifact evidence](docs/AUDIT-2026-11-07.md).
+
+- Mutation helpers accept regular files, refuse source links/directories, and
+  treat dangling destination links as occupied names. Rename targets must be
+  single filenames. Organization refuses category-directory links.
+- `overwrite=False` keeps the existing conflict-numbering behavior.
+  `overwrite=True` refuses a link or directory target; overwriting an ordinary
+  file remains an in-place operation that can partially fail.
+- Deletion is permanent. `delete_files_safe` asks for confirmation by default;
+  callers can explicitly disable it. The duplicate-deletion CLI retains one
+  copy and checks current hashes after confirmation and before each unlink.
+- Dry runs validate and count intended operations without changing files. They
+  do not reserve destination names, freeze a later run, or provide rollback.
+  Batches can partially succeed, and callbacks can interrupt them. Inspect
+  results and keep recoverable copies before destructive operations.
+- Use a trusted, quiet file tree. These checks do not lock paths against other
+  writers, globally confine ancestor links, or form a filesystem sandbox.
+  Perceptual/image-shape and normalized-text matches are review candidates,
+  not proof that files are byte-identical.
 
 ## API Reference
 

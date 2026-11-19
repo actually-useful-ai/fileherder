@@ -7,6 +7,8 @@ and renaming multiple files at once.
 Author: Luke Steuber
 """
 
+from __future__ import annotations
+
 import logging
 import shutil
 from dataclasses import dataclass
@@ -43,6 +45,51 @@ class OperationResult:
 # Batch Operations
 # ============================================================================
 
+def _entry_exists(path: Path) -> bool:
+    """A dangling symbolic link still occupies a directory entry."""
+    return path.exists() or path.is_symlink()
+
+
+def _require_regular_file(path: Path) -> None:
+    """Refuse directories and link sources rather than following their targets."""
+    if path.is_symlink():
+        raise ValueError(f"Symbolic link sources are not supported: {path}")
+    if not path.exists():
+        raise FileNotFoundError(f"Source file not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"Source is not a regular file: {path}")
+
+
+def _prepare_destination_directory(destination: Path, dry_run: bool) -> None:
+    if destination.is_symlink():
+        raise ValueError(f"Symbolic link destinations are not supported: {destination}")
+    if destination.exists():
+        if not destination.is_dir():
+            raise NotADirectoryError(f"Destination is not a directory: {destination}")
+    elif not dry_run:
+        destination.mkdir(parents=True, exist_ok=True)
+
+
+def _destination_path(
+    source: Path, destination: Path, overwrite: bool, *, reject_same_file: bool = False
+) -> Path:
+    """Select an ordinary conflict suffix; this is not a concurrent reservation."""
+    target = destination / source.name
+    if _entry_exists(target):
+        if ((overwrite or reject_same_file) and not target.is_symlink()
+                and target.is_file() and source.samefile(target)):
+            raise ValueError(f"Source and destination refer to the same file: {source}")
+        if overwrite:
+            if target.is_symlink() or not target.is_file():
+                raise ValueError(f"Overwrite target is not a regular file: {target}")
+        else:
+            counter = 1
+            while _entry_exists(target):
+                target = destination / f"{source.stem}_{counter}{source.suffix}"
+                counter += 1
+    return target
+
+
 def move_files(
     files: List[Path],
     destination: Path,
@@ -68,10 +115,6 @@ def move_files(
         >>> result = move_files(files, Path("/archive"))
         >>> print(f"Moved {result.success_count} files")
     """
-    if not destination.exists():
-        if not dry_run:
-            destination.mkdir(parents=True, exist_ok=True)
-
     success_count = 0
     failure_count = 0
     errors = []
@@ -81,19 +124,9 @@ def move_files(
             progress_callback(i, len(files), file_path)
 
         try:
-            if not file_path.exists():
-                raise FileNotFoundError(f"Source file not found: {file_path}")
-
-            dest_path = destination / file_path.name
-
-            # Handle name conflicts
-            if dest_path.exists() and not overwrite:
-                stem = file_path.stem
-                suffix = file_path.suffix
-                counter = 1
-                while dest_path.exists():
-                    dest_path = destination / f"{stem}_{counter}{suffix}"
-                    counter += 1
+            _require_regular_file(file_path)
+            _prepare_destination_directory(destination, dry_run)
+            dest_path = _destination_path(file_path, destination, overwrite, reject_same_file=True)
 
             if not dry_run:
                 shutil.move(str(file_path), str(dest_path))
@@ -140,10 +173,6 @@ def copy_files(
         >>> result = copy_files(files, Path("/backup"))
         >>> print(f"Copied {result.success_count} files")
     """
-    if not destination.exists():
-        if not dry_run:
-            destination.mkdir(parents=True, exist_ok=True)
-
     success_count = 0
     failure_count = 0
     errors = []
@@ -153,19 +182,9 @@ def copy_files(
             progress_callback(i, len(files), file_path)
 
         try:
-            if not file_path.exists():
-                raise FileNotFoundError(f"Source file not found: {file_path}")
-
-            dest_path = destination / file_path.name
-
-            # Handle name conflicts
-            if dest_path.exists() and not overwrite:
-                stem = file_path.stem
-                suffix = file_path.suffix
-                counter = 1
-                while dest_path.exists():
-                    dest_path = destination / f"{stem}_{counter}{suffix}"
-                    counter += 1
+            _require_regular_file(file_path)
+            _prepare_destination_directory(destination, dry_run)
+            dest_path = _destination_path(file_path, destination, overwrite)
 
             if not dry_run:
                 shutil.copy2(str(file_path), str(dest_path))
@@ -241,8 +260,7 @@ def delete_files_safe(
             progress_callback(i, len(files), file_path)
 
         try:
-            if not file_path.exists():
-                raise FileNotFoundError(f"File not found: {file_path}")
+            _require_regular_file(file_path)
 
             if not dry_run:
                 file_path.unlink()
@@ -299,13 +317,16 @@ def rename_files_batch(
             progress_callback(i, total, old_path)
 
         try:
-            if not old_path.exists():
-                raise FileNotFoundError(f"File not found: {old_path}")
+            _require_regular_file(old_path)
+            if (not isinstance(new_name, str) or not new_name
+                    or new_name in {'.', '..'} or '/' in new_name or '\\' in new_name
+                    or Path(new_name).name != new_name):
+                raise ValueError("New name must be a single filename, without a path")
 
             new_path = old_path.parent / new_name
 
             # Check for conflicts
-            if new_path.exists() and new_path != old_path:
+            if _entry_exists(new_path) and new_path != old_path:
                 raise FileExistsError(f"Destination already exists: {new_path}")
 
             if not dry_run:
@@ -379,10 +400,10 @@ def validate_paths(paths: List[Path]) -> tuple[List[Path], List[tuple[Path, str]
     errors = []
 
     for path in paths:
-        if not path.exists():
-            errors.append((path, "File does not exist"))
-        elif not path.is_file():
-            errors.append((path, "Not a file"))
+        try:
+            _require_regular_file(path)
+        except (OSError, ValueError) as e:
+            errors.append((path, str(e)))
         else:
             valid.append(path)
 

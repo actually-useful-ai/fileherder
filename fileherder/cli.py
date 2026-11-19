@@ -7,6 +7,8 @@ operations with progress bars, tables, and colors.
 Author: Luke Steuber
 """
 
+from __future__ import annotations
+
 import sys
 import argparse
 import logging
@@ -121,9 +123,11 @@ class FileHerderCLI:
         self.print(f"  Wasted space: [red]{format_size(total_waste)}[/red]")
 
         # Offer to delete duplicates
-        if delete and self.console:
-            if Confirm.ask("\nDelete duplicate files (keeping one copy of each)?"):
-                self._delete_duplicates_interactive(duplicates)
+        if delete:
+            if not self.console:
+                self.print("Deletion requires the optional CLI dependency: pip install 'fileherder[cli]'")
+                return 1
+            return self._delete_duplicates_interactive(duplicates)
 
         return 0
 
@@ -165,30 +169,59 @@ class FileHerderCLI:
         self.console.print(table)
 
     def _delete_duplicates_interactive(self, duplicates: list[DuplicateGroup]):
-        """Interactively delete duplicate files, keeping one copy."""
-        files_to_delete = []
+        """Confirm, then recheck current bytes before retiring duplicate entries.
 
-        for group in duplicates:
-            # Keep first file, delete the rest
-            files_to_delete.extend(group.files[1:])
-
-        self.print(f"\n[yellow]About to delete {len(files_to_delete)} duplicate files[/yellow]")
+        These checks reject stale scan results; they are not filesystem locking
+        against a concurrent process replacing paths after the final check.
+        """
+        total = sum(max(0, len(group.files) - 1) for group in duplicates)
+        self.print(f"\n[yellow]About to delete {total} duplicate files[/yellow]")
         self.print("[green]Keeping the first occurrence of each file[/green]")
+        if not Confirm.ask("\nDelete duplicate files (keeping one copy of each)?"):
+            return 0
 
-        result = delete_files_safe(
-            files_to_delete,
-            require_confirmation=True,
-            dry_run=False
-        )
+        deleted = 0
+        failed = False
+        for group in duplicates:
+            files = group.files
 
-        if result.success:
-            self.print(f"\n[green]✓ Successfully deleted {result.success_count} files[/green]")
-        else:
-            self.print(f"\n[yellow]Deleted {result.success_count} files with {result.failure_count} errors[/yellow]")
-            if result.errors:
-                self.print("\n[red]Errors:[/red]")
-                for path, error in result.errors[:10]:
-                    self.print(f"  - {path}: {error}")
+            def unchanged(path):
+                try:
+                    if path.is_symlink() or not path.is_file():
+                        return False
+                    result = self.herder.duplicate_finder.hash_file(path)
+                except (OSError, RuntimeError):
+                    return False
+                return result.success and result.hash_value == group.hash_value
+
+            # A repeated path must never turn the retained copy into a target.
+            try:
+                valid = (len(files) >= 2
+                         and all(unchanged(path) for path in files)
+                         and len({path.resolve() for path in files}) == len(files))
+            except (OSError, RuntimeError):
+                valid = False
+            if not valid:
+                self.print("[red]Skipped a changed or invalid duplicate group; no files in it were deleted.[/red]")
+                failed = True
+                continue
+
+            keeper = files[0]
+            for path in files[1:]:
+                if not unchanged(keeper) or not unchanged(path):
+                    self.print("[red]Stopped a changed duplicate group; remaining files were retained.[/red]")
+                    failed = True
+                    break
+                result = delete_files_safe([path], require_confirmation=False)
+                deleted += result.success_count
+                if not result.success:
+                    failed = True
+                    for error_path, error in result.errors[:10]:
+                        self.print(f"  - {error_path}: {error}")
+                    break
+
+        self.print(f"\nDeleted {deleted} duplicate files; retained one verified copy per completed group.")
+        return 1 if failed else 0
 
     def organize_command(
         self,
